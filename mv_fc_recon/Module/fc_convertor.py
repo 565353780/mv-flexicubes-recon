@@ -129,7 +129,6 @@ class FCConvertor(object):
         mesh: Union[str, trimesh.Trimesh, None] = None,
         resolution: int = 64,
         device: str = 'cuda:0',
-        grid_scale: float = 2.0,
     ) -> Optional[Dict]:
         """
         从三角网格创建FlexiCubes参数
@@ -140,7 +139,6 @@ class FCConvertor(object):
             mesh: 网格文件路径或trimesh对象，如果为None则随机初始化SDF
             resolution: FlexiCubes分辨率（体素网格分辨率）
             device: 计算设备
-            grid_scale: 网格缩放因子，确保网格大于目标物体
 
         Returns:
             dict包含: fc, sdf, deform, weight, x_nx3, cube_fx8, grid_edges
@@ -161,13 +159,7 @@ class FCConvertor(object):
         # x_nx3: [N, 3] 网格顶点坐标，范围[-1, 1]
         # cube_fx8: [F, 8] 每个立方体的8个顶点索引
 
-        # 放大网格使其大于目标物体（参考官方示例）
-        x_nx3 = x_nx3 * grid_scale
-
         if mesh is not None:
-            # 直接在x_nx3坐标位置计算SDF值（更精确的方法）
-            # 注意：x_nx3的范围是[-grid_scale, grid_scale]，而mesh已归一化到[-0.9, 0.9]
-            # 所以mesh会在grid范围内
             sdf_values = FCConvertor.meshToSDF(mesh, x_nx3)
         else:
             # 随机初始化SDF（参考官方示例）
@@ -202,7 +194,6 @@ class FCConvertor(object):
             'x_nx3': x_nx3,
             'cube_fx8': cube_fx8,
             'resolution': resolution,
-            'grid_scale': grid_scale,
             'grid_edges': grid_edges,
         }
 
@@ -233,11 +224,10 @@ class FCConvertor(object):
         x_nx3 = fc_params['x_nx3']
         cube_fx8 = fc_params['cube_fx8']
         resolution = fc_params['resolution']
-        grid_scale = fc_params.get('grid_scale', 2.0)
 
         # 应用变形（参考官方示例：使用tanh限制变形范围）
         # 变形范围限制为网格单元大小的一半
-        max_deform = (grid_scale - 1e-8) / (resolution * 2)
+        max_deform = (1.0 - 1e-8) / (resolution * 2)
         grid_verts = x_nx3 + max_deform * torch.tanh(deform)
 
         # 使用FlexiCubes提取mesh
