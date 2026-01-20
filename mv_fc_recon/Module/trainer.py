@@ -72,17 +72,17 @@ class Trainer(object):
         lambda_render: float = 1.0,         # 渲染损失权重
         # FlexiCubes 专用正则化（推荐使用）
         lambda_sdf_smooth: float = 0.1,     # SDF 平滑：惩罚相邻网格点 SDF 差异
-        lambda_sdf_grad_smooth: float = 0.0,  # SDF 二阶平滑：惩罚梯度变化（更好保持细节）
+        lambda_sdf_grad_smooth: float = 0.01,  # SDF 二阶平滑：惩罚梯度变化（更好保持细节）
         lambda_weight_reg: float = 0.01,    # 权重正则化：约束 alpha/beta/gamma
-        lambda_mesh_smooth: float = 0.0,    # 网格 Laplacian 平滑（可选）
-        lambda_normal_consistency: float = 0.0,  # 法线一致性（可选）
+        lambda_mesh_smooth: float = 0.01,    # 网格 Laplacian 平滑（可选）
+        lambda_normal_consistency: float = 0.01,  # 法线一致性（可选）
         lambda_dev: float = 0.5,            # FlexiCubes 可展性正则化
         # SDF 平滑参数
         sdf_smooth_mode: str = 'adaptive',  # 'l2', 'adaptive', 'huber' (推荐 'l2'，adaptive 可能信号太少)
         sdf_smooth_threshold: float = 0.05,  # adaptive/huber 模式的阈值
         # 动态权重调整
         dynamic_sdf_smooth: bool = False,   # 是否动态调整 SDF 平滑权重
-        sdf_smooth_warmup: int = 100,       # 动态调整的 warmup 迭代数
+        sdf_smooth_warmup: int = 50,       # 动态调整的 warmup 迭代数
         sdf_smooth_scale: float = 2.0,      # 动态调整的最大缩放因子
         # 传统 SDF 约束（不推荐用于 FlexiCubes，默认关闭）
         # 其他参数

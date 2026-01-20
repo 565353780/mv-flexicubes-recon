@@ -2,7 +2,7 @@ import sys
 sys.path.append('../../MATCH/camera-control')
 
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 import pickle
 
 from mv_fc_recon.Method.time import getCurrentTime
@@ -34,10 +34,10 @@ def demo():
     fitting_mesh = Trainer.fitImagesWithSDFLoss(
         camera_list=camera_list,
         mesh=gen_mesh_file_path,
-        resolution=192,
+        resolution=256,
         device=device,
-        num_iterations=60,
-        log_interval=10,
+        num_iterations=200,
+        log_interval=5,
         log_dir=log_dir,
     )
 
