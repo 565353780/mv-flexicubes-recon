@@ -225,30 +225,91 @@ class FCConvertor(object):
         cube_fx8 = fc_params['cube_fx8']
         resolution = fc_params['resolution']
 
+        # 检查输入参数是否包含NaN或Inf，创建清理后的副本用于提取
+        sdf_clean = sdf.clone()
+        if torch.isnan(sdf_clean).any() or torch.isinf(sdf_clean).any():
+            # 如果SDF包含NaN或Inf，使用裁剪后的值
+            sdf_clean = torch.clamp(sdf_clean, -10.0, 10.0)
+            sdf_clean = torch.where(torch.isnan(sdf_clean), torch.zeros_like(sdf_clean), sdf_clean)
+            sdf_clean = torch.where(torch.isinf(sdf_clean), torch.zeros_like(sdf_clean), sdf_clean)
+        else:
+            # 即使没有NaN/Inf，也进行裁剪以防止极端值
+            sdf_clean = torch.clamp(sdf_clean, -10.0, 10.0)
+        
+        deform_clean = deform.clone()
+        if torch.isnan(deform_clean).any() or torch.isinf(deform_clean).any():
+            # 如果deform包含NaN或Inf，设置为0
+            deform_clean = torch.where(torch.isnan(deform_clean), torch.zeros_like(deform_clean), deform_clean)
+            deform_clean = torch.where(torch.isinf(deform_clean), torch.zeros_like(deform_clean), deform_clean)
+        
+        weight_clean = weight.clone()
+        if torch.isnan(weight_clean).any() or torch.isinf(weight_clean).any():
+            # 如果weight包含NaN或Inf，设置为0
+            weight_clean = torch.where(torch.isnan(weight_clean), torch.zeros_like(weight_clean), weight_clean)
+            weight_clean = torch.where(torch.isinf(weight_clean), torch.zeros_like(weight_clean), weight_clean)
+
         # 应用变形（参考官方示例：使用tanh限制变形范围）
         # 变形范围限制为网格单元大小的一半
         max_deform = (1.0 - 1e-8) / (resolution * 2)
-        grid_verts = x_nx3 + max_deform * torch.tanh(deform)
+        grid_verts = x_nx3 + max_deform * torch.tanh(deform_clean)
 
         # 使用FlexiCubes提取mesh
         # 参考官方API：
         # beta: [F, 12] - 12条边的插值权重
         # alpha: [F, 8] - 8个顶点的权重
         # gamma_f: [F] - 每个立方体的权重
-        vertices, faces, L_dev = fc(
-            grid_verts,           # voxelgrid_vertices
-            sdf,                  # scalar_field
-            cube_fx8,             # cube_idx
-            resolution,           # resolution
-            beta=weight[:, :12],        # 12条边的插值权重
-            alpha=weight[:, 12:20],     # 8个顶点的权重
-            gamma_f=weight[:, 20],      # 每个立方体的权重（注意是1D）
-            training=training,
-        )
+        try:
+            vertices, faces, L_dev = fc(
+                grid_verts,           # voxelgrid_vertices
+                sdf_clean,            # scalar_field (使用清理后的SDF)
+                cube_fx8,             # cube_idx
+                resolution,           # resolution
+                beta=weight_clean[:, :12],        # 12条边的插值权重
+                alpha=weight_clean[:, 12:20],     # 8个顶点的权重
+                gamma_f=weight_clean[:, 20],      # 每个立方体的权重（注意是1D）
+                training=training,
+            )
 
-        mesh = trimesh.Trimesh(
-            vertices=vertices.detach().cpu().numpy(),
-            faces=faces.cpu().numpy(),
-        )
+            # 检查提取的顶点和面片是否有效
+            if vertices is None or faces is None:
+                raise ValueError("FlexiCubes returned None vertices or faces")
+            
+            if len(vertices) == 0 or len(faces) == 0:
+                raise ValueError("FlexiCubes returned empty mesh")
+
+            # 检查是否包含NaN或Inf
+            if torch.isnan(vertices).any() or torch.isinf(vertices).any():
+                raise ValueError("Extracted vertices contain NaN or Inf")
+
+            mesh = trimesh.Trimesh(
+                vertices=vertices.detach().cpu().numpy(),
+                faces=faces.cpu().numpy(),
+            )
+
+            # 尝试修复网格（如果可能）
+            try:
+                # 检查并修复网格
+                if hasattr(mesh, 'fill_holes'):
+                    mesh.fill_holes()
+                if hasattr(mesh, 'remove_duplicate_faces'):
+                    mesh.remove_duplicate_faces()
+                if hasattr(mesh, 'remove_unreferenced_vertices'):
+                    mesh.remove_unreferenced_vertices()
+            except Exception:
+                # 如果修复失败，继续使用原始网格
+                pass
+
+        except Exception as e:
+            # 如果提取失败，返回一个空的网格
+            print(f'[WARNING][FCConvertor::extractMesh] Failed to extract mesh: {e}')
+            # 创建一个最小的空网格（使用正确的形状）
+            device = sdf.device
+            empty_vertices = torch.zeros((0, 3), device=device, dtype=torch.float32)
+            # 创建空网格时使用正确的numpy数组形状
+            empty_vertices_np = np.zeros((0, 3), dtype=np.float32)
+            empty_faces_np = np.zeros((0, 3), dtype=np.int32)
+            empty_mesh = trimesh.Trimesh(vertices=empty_vertices_np, faces=empty_faces_np)
+            empty_L_dev = torch.tensor(0.0, device=device, dtype=torch.float32)
+            return empty_mesh, empty_vertices, empty_L_dev
 
         return mesh, vertices, L_dev

@@ -125,73 +125,126 @@ class Trainer(object):
                 curr_mesh, _, _ = FCConvertor.extractMesh(
                     fc_params, training=False
                 )
-                curr_mesh.export(log_dir + 'start_fc_mesh.ply')
+                # 检查网格是否有效再导出
+                if curr_mesh is not None and len(curr_mesh.vertices) > 0 and len(curr_mesh.faces) > 0:
+                    try:
+                        curr_mesh.export(log_dir + 'start_fc_mesh.ply')
+                    except Exception as e:
+                        print(f'[WARNING] Failed to export start mesh: {e}')
+                else:
+                    print('[WARNING] Start mesh is empty, skipping export')
 
         # 训练循环
         pbar = tqdm(range(num_iterations), desc='FlexiCubes Optimization')
         for iteration in pbar:
             optimizer.zero_grad()
 
-            # 从FlexiCubes参数提取mesh（只提取一次，用于所有视角）
-            current_mesh, vertices, L_dev = FCConvertor.extractMesh(
-                fc_params, training=True
-            )
-
-            # 使用所有相机进行渲染
-            num_cameras = len(camera_list)
-            batch_indices = list(range(num_cameras))
-
-            total_render_loss = 0.0
-            render_rgb_list = []  # 保存前4个视角的渲染结果用于TensorBoard
-            render_idx_list = []  # 保存对应的索引
-
-            for idx in batch_indices:
-                camera = camera_list[idx]
-                target_rgb = target_images[idx]
-
-                # 渲染
-                render_dict = NVDiffRastRenderer.renderVertexColor(
-                    mesh=current_mesh,
-                    camera=camera,
-                    bg_color=bg_color,
-                    vertices_tensor=vertices,
-                    enable_antialias=True,
+            try:
+                # 从FlexiCubes参数提取mesh（只提取一次，用于所有视角）
+                current_mesh, vertices, L_dev = FCConvertor.extractMesh(
+                    fc_params, training=True
                 )
 
-                render_rgb = render_dict['image']  # [H, W, 3]
+                # 检查网格有效性
+                if current_mesh is None or len(current_mesh.vertices) == 0 or len(current_mesh.faces) == 0:
+                    print(f'[WARNING] Invalid mesh at iteration {iteration}, skipping...')
+                    continue
 
-                # 确保渲染结果在[0, 1]范围
-                if render_rgb.max() > 1.0:
-                    render_rgb = render_rgb / 255.0
+                # 检查顶点和面片数量是否合理
+                if len(current_mesh.vertices) > 1000000 or len(current_mesh.faces) > 2000000:
+                    print(f'[WARNING] Mesh too large at iteration {iteration}, skipping...')
+                    continue
 
-                # 保存前4个视角的渲染结果用于TensorBoard
-                if len(render_rgb_list) < 4:
-                    render_rgb_list.append(render_rgb.clone())
-                    render_idx_list.append(idx)
+                # 使用所有相机进行渲染
+                num_cameras = len(camera_list)
+                batch_indices = list(range(num_cameras))
 
-                # RGB loss（只在有效区域计算）
-                rgb_loss = ((render_rgb - target_rgb).abs()).mean()
+                total_render_loss = 0.0
+                render_rgb_list = []  # 保存前4个视角的渲染结果用于TensorBoard
+                render_idx_list = []  # 保存对应的索引
 
-                # 组合渲染损失
-                total_render_loss = total_render_loss + rgb_loss
+                for idx in batch_indices:
+                    camera = camera_list[idx]
+                    target_rgb = target_images[idx]
 
-            # 平均渲染损失
-            avg_render_loss = total_render_loss / len(batch_indices)
+                    # 渲染
+                    render_dict = NVDiffRastRenderer.renderVertexColor(
+                        mesh=current_mesh,
+                        camera=camera,
+                        bg_color=bg_color,
+                        vertices_tensor=vertices,
+                        enable_antialias=True,
+                    )
 
-            # FlexiCubes developability正则化损失
-            loss_dev = L_dev.mean() if L_dev is not None and L_dev.numel() > 0 else torch.tensor(0.0, device=device)
+                    render_rgb = render_dict['image']  # [H, W, 3]
 
-            # SDF边缘正则化损失
-            loss_sdf_reg = computeSDFRegLoss(fc_params['sdf'], grid_edges)
+                    # 确保渲染结果在[0, 1]范围
+                    if render_rgb.max() > 1.0:
+                        render_rgb = render_rgb / 255.0
 
-            # 总损失
-            total_loss = avg_render_loss + lambda_dev * loss_dev + lambda_sdf_reg * loss_sdf_reg
+                    # 保存前4个视角的渲染结果用于TensorBoard
+                    if len(render_rgb_list) < 4:
+                        render_rgb_list.append(render_rgb.clone())
+                        render_idx_list.append(idx)
 
-            # 反向传播
-            total_loss.backward()
+                    # RGB loss（只在有效区域计算）
+                    rgb_loss = ((render_rgb - target_rgb).abs()).mean()
 
-            # 更新参数
-            optimizer.step()
+                    # 组合渲染损失
+                    total_render_loss = total_render_loss + rgb_loss
+
+                # 平均渲染损失
+                avg_render_loss = total_render_loss / len(batch_indices)
+
+                # FlexiCubes developability正则化损失
+                loss_dev = L_dev.mean() if L_dev is not None and L_dev.numel() > 0 else torch.tensor(0.0, device=device)
+
+                # SDF边缘正则化损失
+                loss_sdf_reg = computeSDFRegLoss(fc_params['sdf'], grid_edges)
+
+                # 总损失
+                total_loss = avg_render_loss + lambda_dev * loss_dev + lambda_sdf_reg * loss_sdf_reg
+
+                # 检查损失是否包含NaN或Inf
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    print(f'[WARNING] Invalid loss (NaN/Inf) at iteration {iteration}, skipping...')
+                    continue
+
+                # 反向传播
+                total_loss.backward()
+
+                # 梯度裁剪，防止梯度爆炸
+                torch.nn.utils.clip_grad_norm_(
+                    [fc_params['sdf'], fc_params['deform'], fc_params['weight']],
+                    max_norm=1.0
+                )
+
+                # 检查梯度是否包含NaN或Inf
+                has_nan_grad = False
+                for param in [fc_params['sdf'], fc_params['deform'], fc_params['weight']]:
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            has_nan_grad = True
+                            break
+                
+                if has_nan_grad:
+                    print(f'[WARNING] NaN/Inf gradients at iteration {iteration}, skipping update...')
+                    optimizer.zero_grad()
+                    continue
+
+                # 更新参数
+                optimizer.step()
+
+                # 裁剪SDF值，防止极端值导致网格提取失败
+                with torch.no_grad():
+                    fc_params['sdf'].data = torch.clamp(fc_params['sdf'].data, -10.0, 10.0)
+
+            except Exception as e:
+                print(f'[ERROR] Exception at iteration {iteration}: {e}')
+                # 如果出现异常，尝试恢复参数到上一个有效状态
+                # 这里我们简单地跳过这次迭代
+                optimizer.zero_grad()
+                continue
 
             # 更新进度条
             if iteration % log_interval == 0 or iteration == num_iterations - 1:
@@ -292,77 +345,123 @@ class Trainer(object):
         for iteration in pbar:
             optimizer.zero_grad()
 
-            # 从FlexiCubes参数提取mesh
-            current_mesh, vertices, L_dev = FCConvertor.extractMesh(
-                fc_params, training=True
-            )
-
-            # 随机采样batch_size个视角
-            num_cameras = len(camera_list)
-            if batch_size >= num_cameras:
-                batch_indices = list(range(num_cameras))
-            else:
-                batch_indices = np.random.choice(num_cameras, batch_size, replace=False).tolist()
-
-            total_depth_loss = 0.0
-            total_mask_loss = 0.0
-
-            for idx in batch_indices:
-                camera = camera_list[idx]
-                target_depth = target_depths[idx]
-                target_mask = target_masks[idx]
-
-                # 渲染深度
-                render_dict = NVDiffRastRenderer.renderDepth(
-                    mesh=current_mesh,
-                    camera=camera,
-                    bg_color=bg_color,
-                    vertices_tensor=vertices,
-                    enable_antialias=True,
+            try:
+                # 从FlexiCubes参数提取mesh
+                current_mesh, vertices, L_dev = FCConvertor.extractMesh(
+                    fc_params, training=True
                 )
 
-                render_depth = render_dict['depth']  # [H, W]
-                rasterize_output = render_dict['rasterize_output']  # [H, W, 4]
+                # 检查网格有效性
+                if current_mesh is None or len(current_mesh.vertices) == 0 or len(current_mesh.faces) == 0:
+                    print(f'[WARNING] Invalid mesh at iteration {iteration}, skipping...')
+                    continue
 
-                # 渲染的mask
-                render_mask = (rasterize_output[..., 3] > 0).float()  # [H, W]
+                # 检查顶点和面片数量是否合理
+                if len(current_mesh.vertices) > 1000000 or len(current_mesh.faces) > 2000000:
+                    print(f'[WARNING] Mesh too large at iteration {iteration}, skipping...')
+                    continue
 
-                # Mask loss
-                intersection = (render_mask * target_mask).sum()
-                union = render_mask.sum() + target_mask.sum() - intersection
-                mask_loss = 1.0 - intersection / (union + 1e-8)
+                # 随机采样batch_size个视角
+                num_cameras = len(camera_list)
+                if batch_size >= num_cameras:
+                    batch_indices = list(range(num_cameras))
+                else:
+                    batch_indices = np.random.choice(num_cameras, batch_size, replace=False).tolist()
 
-                # Depth loss（只在有效区域计算）
-                valid_mask = render_mask * target_mask
-                depth_diff = (render_depth - target_depth).abs() * valid_mask
-                depth_loss = depth_diff.sum() / (valid_mask.sum() + 1e-8)
+                total_depth_loss = 0.0
+                total_mask_loss = 0.0
 
-                total_depth_loss += depth_loss
-                total_mask_loss += mask_loss
+                for idx in batch_indices:
+                    camera = camera_list[idx]
+                    target_depth = target_depths[idx]
+                    target_mask = target_masks[idx]
 
-            # 平均损失
-            avg_depth_loss = total_depth_loss / len(batch_indices)
-            avg_mask_loss = total_mask_loss / len(batch_indices)
+                    # 渲染深度
+                    render_dict = NVDiffRastRenderer.renderDepth(
+                        mesh=current_mesh,
+                        camera=camera,
+                        bg_color=bg_color,
+                        vertices_tensor=vertices,
+                        enable_antialias=True,
+                    )
 
-            # FlexiCubes developability正则化损失
-            loss_dev = L_dev.mean() if L_dev is not None and L_dev.numel() > 0 else torch.tensor(0.0, device=device)
+                    render_depth = render_dict['depth']  # [H, W]
+                    rasterize_output = render_dict['rasterize_output']  # [H, W, 4]
 
-            # SDF边缘正则化损失
-            loss_sdf_reg = computeSDFRegLoss(fc_params['sdf'], grid_edges)
+                    # 渲染的mask
+                    render_mask = (rasterize_output[..., 3] > 0).float()  # [H, W]
 
-            # 总损失
-            total_loss = (
-                avg_mask_loss +
-                lambda_depth * avg_depth_loss +
-                lambda_dev * loss_dev +
-                lambda_sdf_reg * loss_sdf_reg
-            )
+                    # Mask loss
+                    intersection = (render_mask * target_mask).sum()
+                    union = render_mask.sum() + target_mask.sum() - intersection
+                    mask_loss = 1.0 - intersection / (union + 1e-8)
 
-            # 反向传播
-            total_loss.backward()
+                    # Depth loss（只在有效区域计算）
+                    valid_mask = render_mask * target_mask
+                    depth_diff = (render_depth - target_depth).abs() * valid_mask
+                    depth_loss = depth_diff.sum() / (valid_mask.sum() + 1e-8)
 
-            # 更新参数
-            optimizer.step()
+                    total_depth_loss += depth_loss
+                    total_mask_loss += mask_loss
+
+                # 平均损失
+                avg_depth_loss = total_depth_loss / len(batch_indices)
+                avg_mask_loss = total_mask_loss / len(batch_indices)
+
+                # FlexiCubes developability正则化损失
+                loss_dev = L_dev.mean() if L_dev is not None and L_dev.numel() > 0 else torch.tensor(0.0, device=device)
+
+                # SDF边缘正则化损失
+                loss_sdf_reg = computeSDFRegLoss(fc_params['sdf'], grid_edges)
+
+                # 总损失
+                total_loss = (
+                    avg_mask_loss +
+                    lambda_depth * avg_depth_loss +
+                    lambda_dev * loss_dev +
+                    lambda_sdf_reg * loss_sdf_reg
+                )
+
+                # 检查损失是否包含NaN或Inf
+                if torch.isnan(total_loss) or torch.isinf(total_loss):
+                    print(f'[WARNING] Invalid loss (NaN/Inf) at iteration {iteration}, skipping...')
+                    continue
+
+                # 反向传播
+                total_loss.backward()
+
+                # 梯度裁剪，防止梯度爆炸
+                torch.nn.utils.clip_grad_norm_(
+                    [fc_params['sdf'], fc_params['deform'], fc_params['weight']],
+                    max_norm=1.0
+                )
+
+                # 检查梯度是否包含NaN或Inf
+                has_nan_grad = False
+                for param in [fc_params['sdf'], fc_params['deform'], fc_params['weight']]:
+                    if param.grad is not None:
+                        if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                            has_nan_grad = True
+                            break
+                
+                if has_nan_grad:
+                    print(f'[WARNING] NaN/Inf gradients at iteration {iteration}, skipping update...')
+                    optimizer.zero_grad()
+                    continue
+
+                # 更新参数
+                optimizer.step()
+
+                # 裁剪SDF值，防止极端值导致网格提取失败
+                with torch.no_grad():
+                    fc_params['sdf'].data = torch.clamp(fc_params['sdf'].data, -10.0, 10.0)
+
+            except Exception as e:
+                print(f'[ERROR] Exception at iteration {iteration}: {e}')
+                # 如果出现异常，尝试恢复参数到上一个有效状态
+                # 这里我们简单地跳过这次迭代
+                optimizer.zero_grad()
+                continue
 
             # 更新进度条
             if iteration % log_interval == 0 or iteration == num_iterations - 1:
