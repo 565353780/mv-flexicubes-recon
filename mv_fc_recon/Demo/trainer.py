@@ -34,7 +34,7 @@ def demo():
     fitting_mesh = Trainer.fitImagesWithSDFLoss(
         camera_list=camera_list,
         mesh=gen_mesh_file_path,
-        resolution=256,
+        resolution=192,
         device=device,
         num_iterations=200,
         log_interval=5,

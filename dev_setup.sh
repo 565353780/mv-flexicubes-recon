@@ -1,13 +1,12 @@
 cd ..
+git clone https://github.com/565353780/camera-control.git
 git clone https://github.com/NVIDIAGameWorks/kaolin.git
 
-pip install ninja
+cd camera-control
+./setup.sh
 
-pip3 install torch torchvision torchaudio \
-  --index-url https://download.pytorch.org/whl/cu124
+pip install scipy pickle pygltflib ipyevents ipycanvas \
+  rtree warp-lang
 
-pip install scipy trimesh pickle pygltflib ipyevents \
-  ipycanvas rtree warp-lang
-
-cd kaolin
+cd ../kaolin
 python setup.py install
