@@ -52,9 +52,9 @@ class Trainer(object):
             lr_weight = lr
 
         param_groups = [
-            {'params': [fc_params['sdf']], 'lr': lr_sdf},
-            {'params': [fc_params['deform']], 'lr': lr_deform},
-            {'params': [fc_params['weight']], 'lr': lr_weight},
+            dict(params=[fc_params['sdf']], lr=lr_sdf),
+            dict(params=[fc_params['deform']], lr=lr_deform),
+            dict(params=[fc_params['weight']], lr=lr_weight),
         ]
 
         optimizer = torch.optim.Adam(param_groups)
