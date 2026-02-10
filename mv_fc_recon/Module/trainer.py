@@ -25,7 +25,6 @@ from mv_fc_recon.Loss.flexicubes_reg import (
     mesh_normal_consistency_loss,
     mesh_bi_laplacian_smoothness_loss,
 )
-from mv_fc_recon.Module.fc_convertor import FCConvertor
 
 
 class Trainer(object):
@@ -61,9 +60,9 @@ class Trainer(object):
             lr_weight = lr
 
         param_groups = [
-            {'params': [fc_params['sdf']], 'lr': lr_sdf},
-            {'params': [fc_params['deform']], 'lr': lr_deform},
-            {'params': [fc_params['weight']], 'lr': lr_weight},
+            dict(params=[fc_params['sdf']], lr=lr_sdf),
+            dict(params=[fc_params['deform']], lr=lr_deform),
+            dict(params=[fc_params['weight']], lr=lr_weight),
         ]
 
         optimizer = torch.optim.Adam(param_groups)

@@ -1,9 +1,14 @@
 import sys
-sys.path.append('../../zhaozihan/camera-control')
+sys.path.append('../../MATCH/camera-control')
+sys.path.append('../flexi-cubes')
 
 import os
 os.environ['CUDA_VISIBLE_DEVICES'] = '2'
 import pickle
+
+from camera_control.Method.io import loadMeshFile
+from camera_control.Method.mesh import normalizeMesh
+from camera_control.Module.mesh_renderer import MeshRenderer
 
 from mv_fc_recon.Method.time import getCurrentTime
 from mv_fc_recon.Module.trainer import Trainer
@@ -23,14 +28,35 @@ def demo():
 
     home = os.environ['HOME']
 
-    data_folder = home + "/chLi/Dataset/pixel_align/" + shape_id + "/"
+    data_folder_path = home + "/chLi/Dataset/pixel_align/" + shape_id + "/"
 
-    camera_pkl_file_path = data_folder + 'camera.pkl'
-    gen_mesh_file_path = data_folder + "stage2_192_n_d2_d4_d8_d16.ply"
-    # gen_mesh_file_path = data_folder + "bunny.ply"
-    # print(gen_mesh_file_path)
-    # gen_mesh_file_path = data_folder + "gt_normalized.ply"
-    log_dir = data_folder + 'mv-fc-recon/logs/' + getCurrentTime() + '/'
+    camera_pkl_file_path = data_folder_path + 'camera_fc.pkl'
+    if not os.path.exists(camera_pkl_file_path):
+        normalized_gt_mesh_file_path = data_folder_path + 'gt_normalized.ply'
+        if not os.path.exists(normalized_gt_mesh_file_path):
+            gt_mesh_file_path = data_folder_path + 'gt.glb'
+            mesh = loadMeshFile(gt_mesh_file_path)
+            mesh = normalizeMesh(mesh, target_length=0.99)
+            mesh.export(normalized_gt_mesh_file_path)
+
+        mesh = loadMeshFile(normalized_gt_mesh_file_path)
+
+        camera_list = MeshRenderer.sampleRenderData(
+            mesh,
+            camera_num=20,
+            camera_dist=1.6,
+            width=1024,
+            height=1024,
+            fx=1407,
+            fy=1407,
+            bg_color=[255, 255, 255],
+            device=device,
+        )
+        with open(camera_pkl_file_path, "wb") as f:
+            pickle.dump(camera_list, f)
+
+    gen_mesh_file_path = data_folder_path + "stage2_192_v2_n_d2_d4_d8_d16.ply"
+    log_dir = data_folder_path + 'mv-fc-recon/logs/' + getCurrentTime() + '/'
 
     assert os.path.exists(camera_pkl_file_path), f"camera.pkl not found at {camera_pkl_file_path}"
     with open(camera_pkl_file_path, 'rb') as f:
