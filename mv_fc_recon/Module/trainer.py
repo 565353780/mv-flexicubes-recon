@@ -293,17 +293,25 @@ class Trainer(object):
 
             # 检查梯度是否包含 NaN 或 Inf
             has_nan_grad = False
+            has_inf_grad = False
             for param in [fc_params['sdf'], fc_params['deform'], fc_params['weight']]:
                 if param.grad is not None:
-                    if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
+                    if torch.isnan(param.grad).any():
                         has_nan_grad = True
+                    if torch.isinf(param.grad).any():
+                        has_inf_grad = True
+
+                    if has_nan_grad and has_inf_grad:
                         break
 
             if has_nan_grad:
-                print(f'[WARNING] NaN/Inf gradients at iteration {iteration}, skipping update...')
-                optimizer.zero_grad()
+                print(f'[WARNING] NaN gradients at iteration {iteration}, skipping update...')
+
+            if has_inf_grad:
+                print(f'[WARNING] Inf gradients at iteration {iteration}, skipping update...')
+
+            if has_nan_grad or has_inf_grad:
                 exit()
-                continue
 
             # 更新参数
             optimizer.step()
