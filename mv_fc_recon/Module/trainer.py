@@ -11,10 +11,13 @@ from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 from flexi_cubes.Module.fc_convertor import FCConvertor
 
 from mv_fc_recon.Loss.flexicubes_reg import (
-    sdf_smoothness_loss,
-    sdf_gradient_smoothness_loss,
-    weight_regularization_loss, 
+    # sdf_smoothness_loss,
+    # sdf_gradient_smoothness_loss,
+    # weight_regularization_loss, 
+    short_edge_loss, 
     mesh_normal_consistency_loss,
+    sdf_hessian_energy_loss_accurate,
+    sdf_hessian_energy_loss, 
     sdf_reg_loss,
 )
 from mv_fc_recon.Loss.mesh_geo_energy import thin_plate_energy, edge_len_loss
@@ -71,10 +74,11 @@ class Trainer(object):
         num_iterations: int = 120,
         lr: float = 5e-4,
         # 渲染权重（主要驱动力，引导网格变化）
-        lambda_render: float = 1.0,         # 渲染损失权重
-        lambda_thin_plate_energy: float = 1e-2,  # 5e-3 
+        lambda_render: float = 1,         # 渲染损失权重
+        lambda_thin_plate_energy: float = 5e-3,  # 5e-3 
         lambda_reg: float = 0.2,            # FlexiCubes equation(8)&(9) 正则化
-        # lambda_edgelen: float = 1e4, 
+        # lambda_edgelen: float = 0, 
+        lambda_smooth: float = 1e3, 
 
         # 其他参数
         log_interval: int = 10,
@@ -117,7 +121,7 @@ class Trainer(object):
 
         if log_dir:
             with torch.no_grad():
-                curr_mesh, _, _, _= FCConvertor.extractMesh(fc_params, training=False)
+                curr_mesh, _, _, _= FCConvertor.extractMesh(fc_params, training=True)
                 if curr_mesh is not None and len(curr_mesh.vertices) > 0 and len(curr_mesh.faces) > 0:
                     try:
                         curr_mesh.export(log_dir + 'start_fc_mesh.ply')
@@ -227,8 +231,18 @@ class Trainer(object):
                 total_loss = total_loss + reg_loss 
             
 
+            if lambda_smooth > 0: 
+                # loss_normal = mesh_normal_consistency_loss(vertices, faces_tensor)
+                # total_loss = total_loss + lambda_smooth * loss_normal
+                x_nx3 = fc_params['x_nx3'] 
+                loss_hessian = sdf_hessian_energy_loss(sdf, grid_edges, x_nx3) 
+                total_loss = total_loss + lambda_smooth * loss_hessian
+                loss_dict['LN'] = loss_hessian.item() 
+
+                
+
             # if lambda_edgelen > 0: 
-            #     loss_edgelen = edge_len_loss(vertices, faces_tensor) 
+            #     loss_edgelen = short_edge_loss(vertices, faces_tensor) 
             #     total_loss = total_loss + lambda_edgelen * loss_edgelen
             #     loss_dict['EdgeLen'] = loss_edgelen.item()
 
@@ -300,6 +314,8 @@ class Trainer(object):
                 postfix_dict['reg'] = f'{loss_dict["Reg"]:.6f}' 
             if 'EdgeLen' in loss_dict: 
                 postfix_dict['elen'] = f'{loss_dict["EdgeLen"]:.6f}' 
+            if 'LN' in loss_dict: 
+                postfix_dict['LN'] = f'{loss_dict["LN"]:.6f}' 
 
             pbar.set_postfix(postfix_dict)
 
@@ -308,6 +324,6 @@ class Trainer(object):
             writer.close()
 
         # 提取最终 mesh
-        final_mesh, _, _, _ = FCConvertor.extractMesh(fc_params, training=False)
+        final_mesh, _, _, _ = FCConvertor.extractMesh(fc_params, training=True)
 
         return final_mesh

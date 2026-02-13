@@ -12,6 +12,7 @@ def sdf_reg_loss(sdf, all_edges):
 
 
 
+
 def sdf_smoothness_loss(
     sdf: torch.Tensor,
     grid_edges: torch.Tensor,
@@ -64,6 +65,270 @@ def sdf_smoothness_loss(
         raise ValueError(f"Unknown mode: {mode}")
 
     return loss
+
+
+def sdf_hessian_energy_loss(
+    sdf: torch.Tensor,
+    grid_edges: torch.Tensor,
+    x_nx3: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute the Hessian energy loss using centered differences for mixed derivatives.
+    """
+    # Determine grid dimensions from coordinates
+    unique_x = torch.unique(x_nx3[:, 0], sorted=True)
+    unique_y = torch.unique(x_nx3[:, 1], sorted=True)
+    unique_z = torch.unique(x_nx3[:, 2], sorted=True)
+    
+    Nx = len(unique_x)
+    Ny = len(unique_y)
+    Nz = len(unique_z)
+    
+    assert Nx * Ny * Nz == len(sdf), "Grid dimensions don't match number of points"
+    
+    # Compute grid spacing
+    dx = unique_x[1] - unique_x[0] if Nx > 1 else 1.0
+    dy = unique_y[1] - unique_y[0] if Ny > 1 else 1.0
+    dz = unique_z[1] - unique_z[0] if Nz > 1 else 1.0
+    
+    dV = dx * dy * dz
+    
+    # Reshape sdf to 3D grid
+    sdf_3d = sdf.reshape(Nx, Ny, Nz)
+    
+    # Initialize tensors for second derivatives
+    fxx = torch.zeros_like(sdf_3d)
+    fyy = torch.zeros_like(sdf_3d)
+    fzz = torch.zeros_like(sdf_3d)
+    fxy = torch.zeros_like(sdf_3d)
+    fxz = torch.zeros_like(sdf_3d)
+    fyz = torch.zeros_like(sdf_3d)
+    
+    # Pure second derivatives (central difference)
+    if Nx > 2:
+        fxx[1:-1, :, :] = (sdf_3d[2:, :, :] - 2 * sdf_3d[1:-1, :, :] + sdf_3d[:-2, :, :]) / (dx**2)
+    if Ny > 2:
+        fyy[:, 1:-1, :] = (sdf_3d[:, 2:, :] - 2 * sdf_3d[:, 1:-1, :] + sdf_3d[:, :-2, :]) / (dy**2)
+    if Nz > 2:
+        fzz[:, :, 1:-1] = (sdf_3d[:, :, 2:] - 2 * sdf_3d[:, :, 1:-1] + sdf_3d[:, :, :-2]) / (dz**2)
+    
+    # Mixed derivatives (central difference)
+    if Nx > 2 and Ny > 2:
+        # fxy = ∂²f/∂x∂y using central differences
+        fxy[1:-1, 1:-1, :] = (sdf_3d[2:, 2:, :] - sdf_3d[2:, :-2, :] - 
+                               sdf_3d[:-2, 2:, :] + sdf_3d[:-2, :-2, :]) / (4 * dx * dy)
+    
+    if Nx > 2 and Nz > 2:
+        # fxz = ∂²f/∂x∂z using central differences
+        fxz[1:-1, :, 1:-1] = (sdf_3d[2:, :, 2:] - sdf_3d[2:, :, :-2] - 
+                               sdf_3d[:-2, :, 2:] + sdf_3d[:-2, :, :-2]) / (4 * dx * dz)
+    
+    if Ny > 2 and Nz > 2:
+        # fyz = ∂²f/∂y∂z using central differences
+        fyz[:, 1:-1, 1:-1] = (sdf_3d[:, 2:, 2:] - sdf_3d[:, 2:, :-2] - 
+                               sdf_3d[:, :-2, 2:] + sdf_3d[:, :-2, :-2]) / (4 * dy * dz)
+    
+    # Compute the integrand
+    integrand = (fxx**2 + fyy**2 + fzz**2 + 
+                 2 * fxy**2 + 2 * fxz**2 + 2 * fyz**2)
+    
+    loss = torch.mean(integrand) * dV
+    
+    return loss
+
+
+
+def sdf_hessian_energy_loss_accurate(
+    sdf: torch.Tensor,
+    grid_edges: torch.Tensor,
+    x_nx3: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute the Hessian energy (smoothness) loss for a scalar field on a regular grid.
+    
+    Loss = ∫(fxx² + fyy² + fzz² + 2fxy² + 2fxz² + 2fyz²) dV
+    
+    Args:
+        sdf: [N] tensor of scalar values on regular grid points
+        grid_edges: [E, 2] grid edge indices - each row contains [i, j] for edge from point i to j
+        x_nx3: [N, 3] tensor of grid point coordinates
+    
+    Returns:
+        loss: scalar tensor representing the discretized Hessian energy
+    """
+    # Determine grid dimensions from coordinates
+    unique_x = torch.unique(x_nx3[:, 0], sorted=True)
+    unique_y = torch.unique(x_nx3[:, 1], sorted=True)
+    unique_z = torch.unique(x_nx3[:, 2], sorted=True)
+    
+    Nx = len(unique_x)
+    Ny = len(unique_y)
+    Nz = len(unique_z)
+    
+    # Compute grid spacing
+    dx = unique_x[1] - unique_x[0] if Nx > 1 else 1.0
+    dy = unique_y[1] - unique_y[0] if Ny > 1 else 1.0
+    dz = unique_z[1] - unique_z[0] if Nz > 1 else 1.0
+    
+    # Cell volume
+    dV = dx * dy * dz
+    
+    # Reshape sdf to 3D grid for easier indexing
+    sdf_3d = sdf.reshape(Nx, Ny, Nz)
+    
+    # Identify edges along each direction using coordinate differences
+    edge_vectors = x_nx3[grid_edges[:, 1]] - x_nx3[grid_edges[:, 0]]
+    
+    # Find edges aligned with each axis (tolerance for floating point)
+    eps = 1e-6
+    edges_x = torch.abs(edge_vectors[:, 1]) < eps and torch.abs(edge_vectors[:, 2]) < eps
+    edges_y = torch.abs(edge_vectors[:, 0]) < eps and torch.abs(edge_vectors[:, 2]) < eps
+    edges_z = torch.abs(edge_vectors[:, 0]) < eps and torch.abs(edge_vectors[:, 1]) < eps
+    
+    # Compute first derivatives using edges
+    # For each direction, we can directly compute the derivative at edge midpoints
+    grad_x_mid = torch.zeros(len(grid_edges), device=sdf.device)
+    grad_y_mid = torch.zeros(len(grid_edges), device=sdf.device)
+    grad_z_mid = torch.zeros(len(grid_edges), device=sdf.device)
+    
+    # X-direction edges
+    if torch.any(edges_x):
+        edge_indices = torch.where(edges_x)[0]
+        for idx in edge_indices:
+            i0, i1 = grid_edges[idx]
+            grad_x_mid[idx] = (sdf[i1] - sdf[i0]) / dx
+    
+    # Y-direction edges
+    if torch.any(edges_y):
+        edge_indices = torch.where(edges_y)[0]
+        for idx in edge_indices:
+            i0, i1 = grid_edges[idx]
+            grad_y_mid[idx] = (sdf[i1] - sdf[i0]) / dy
+    
+    # Z-direction edges
+    if torch.any(edges_z):
+        edge_indices = torch.where(edges_z)[0]
+        for idx in edge_indices:
+            i0, i1 = grid_edges[idx]
+            grad_z_mid[idx] = (sdf[i1] - sdf[i0]) / dz
+    
+    # Now compute second derivatives using pairs of parallel edges
+    fxx = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    fyy = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    fzz = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    fxy = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    fxz = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    fyz = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    
+    count_xx = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    count_yy = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    count_zz = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    count_xy = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    count_xz = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    count_yz = torch.zeros(Nx, Ny, Nz, device=sdf.device)
+    
+    # For fxx: use pairs of x-edges that share the same y,z coordinates
+    if torch.any(edges_x):
+        # Group x-edges by their (y,z) coordinates
+        x_edge_coords = []
+        x_edge_values = []
+        x_edge_indices = torch.where(edges_x)[0]
+        
+        for idx in x_edge_indices:
+            i0, i1 = grid_edges[idx]
+            # Get coordinates of the first endpoint
+            coord = x_nx3[i0]
+            # For x-edge, we store (y,z) as key
+            x_edge_coords.append((coord[1].item(), coord[2].item()))
+            x_edge_values.append(grad_x_mid[idx])
+        
+        # Group edges by (y,z)
+        # For each unique (y,z), collect all x-edges and sort by x-coordinate
+        # This is simplified - in practice you'd need a more efficient grouping
+    
+    # For simplicity and correctness, let's use finite differences on the grid
+    # This is more straightforward and still valid for regular grids
+    
+    # Pure second derivatives using central differences
+    if Nx > 2:
+        fxx[1:-1, :, :] = (sdf_3d[2:, :, :] - 2 * sdf_3d[1:-1, :, :] + sdf_3d[:-2, :, :]) / (dx**2)
+        count_xx[1:-1, :, :] = 1
+    
+    if Ny > 2:
+        fyy[:, 1:-1, :] = (sdf_3d[:, 2:, :] - 2 * sdf_3d[:, 1:-1, :] + sdf_3d[:, :-2, :]) / (dy**2)
+        count_yy[:, 1:-1, :] = 1
+    
+    if Nz > 2:
+        fzz[:, :, 1:-1] = (sdf_3d[:, :, 2:] - 2 * sdf_3d[:, :, 1:-1] + sdf_3d[:, :, :-2]) / (dz**2)
+        count_zz[:, :, 1:-1] = 1
+    
+    # Mixed derivatives using central differences
+    if Nx > 1 and Ny > 1:
+        # fxy at cell centers
+        fxy_centers = (sdf_3d[1:, 1:, :] - sdf_3d[1:, :-1, :] - 
+                       sdf_3d[:-1, 1:, :] + sdf_3d[:-1, :-1, :]) / (dx * dy)
+        # Distribute to vertices (averaging 4 adjacent cells)
+        fxy[:-1, :-1, :] += fxy_centers
+        fxy[1:, :-1, :] += fxy_centers
+        fxy[:-1, 1:, :] += fxy_centers
+        fxy[1:, 1:, :] += fxy_centers
+        count_xy[:-1, :-1, :] += 1
+        count_xy[1:, :-1, :] += 1
+        count_xy[:-1, 1:, :] += 1
+        count_xy[1:, 1:, :] += 1
+    
+    if Nx > 1 and Nz > 1:
+        # fxz at cell centers
+        fxz_centers = (sdf_3d[1:, :, 1:] - sdf_3d[1:, :, :-1] - 
+                       sdf_3d[:-1, :, 1:] + sdf_3d[:-1, :, :-1]) / (dx * dz)
+        # Distribute to vertices
+        fxz[:-1, :, :-1] += fxz_centers
+        fxz[1:, :, :-1] += fxz_centers
+        fxz[:-1, :, 1:] += fxz_centers
+        fxz[1:, :, 1:] += fxz_centers
+        count_xz[:-1, :, :-1] += 1
+        count_xz[1:, :, :-1] += 1
+        count_xz[:-1, :, 1:] += 1
+        count_xz[1:, :, 1:] += 1
+    
+    if Ny > 1 and Nz > 1:
+        # fyz at cell centers
+        fyz_centers = (sdf_3d[:, 1:, 1:] - sdf_3d[:, 1:, :-1] - 
+                       sdf_3d[:, :-1, 1:] + sdf_3d[:, :-1, :-1]) / (dy * dz)
+        # Distribute to vertices
+        fyz[:, :-1, :-1] += fyz_centers
+        fyz[:, 1:, :-1] += fyz_centers
+        fyz[:, :-1, 1:] += fyz_centers
+        fyz[:, 1:, 1:] += fyz_centers
+        count_yz[:, :-1, :-1] += 1
+        count_yz[:, 1:, :-1] += 1
+        count_yz[:, :-1, 1:] += 1
+        count_yz[:, 1:, 1:] += 1
+    
+    # Average the mixed derivatives
+    fxy = fxy / (count_xy + 1e-8)
+    fxz = fxz / (count_xz + 1e-8)
+    fyz = fyz / (count_yz + 1e-8)
+    
+    # Compute the integrand
+    integrand = (fxx**2 + fyy**2 + fzz**2 + 
+                 2 * fxy**2 + 2 * fxz**2 + 2 * fyz**2)
+    
+    # Integrate over the volume
+    loss = torch.sum(integrand) * dV
+    
+    return loss
+
+
+
+
+
+
+
+
+
+
+
 
 
 def sdf_gradient_smoothness_loss(
@@ -224,12 +489,60 @@ def weight_regularization_loss(
 
 
 
-
-def mesh_normal_consistency_loss(
-    vertices: torch.Tensor,
-    faces: torch.Tensor,
+def short_edge_loss(
+    V: torch.Tensor,
+    F: torch.Tensor,
+    target_ratio: float = 0.5,
+    strength: float = 1.0,
+    eps: float = 1e-12,
 ) -> torch.Tensor:
-    """网格法线一致性损失
+    """
+    惩罚网格中相对于平均边长过短的边。
+
+    Args:
+        V: [num_vertices, 3] 顶点坐标
+        F: [num_faces, 3] 面片索引
+        target_ratio: 小于平均边长 * target_ratio 的边会被惩罚
+        strength: loss 权重系数
+        eps: 防止除零
+
+    Returns:
+        loss: 标量张量
+    """
+    # 提取每条边
+    v0 = V[F[:, 0]]
+    v1 = V[F[:, 1]]
+    v2 = V[F[:, 2]]
+
+    e0 = torch.norm(v1 - v2, dim=1)
+    e1 = torch.norm(v2 - v0, dim=1)
+    e2 = torch.norm(v0 - v1, dim=1)
+
+    lengths = torch.cat([e0, e1, e2], dim=0)
+
+    # 计算平均边长
+    mean_len = lengths.mean()
+
+    # 最小边阈值 = 平均边长 * target_ratio
+    min_len = mean_len * target_ratio
+
+    # 计算比率差异: ratio = edge_length / min_len
+    ratio = lengths / (min_len + eps)
+
+    # 只惩罚 ratio < 1 的边
+    short_edges = torch.relu(1.0 - ratio)
+
+    # loss = 平均 ( (1 - ratio)^2 )
+    loss = (short_edges ** 2).mean() * strength
+
+    return loss
+
+
+
+
+def mesh_normal_consistency_loss(vertices: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
+    """
+    法线一致性损失（与叉乘方向无关，向量化实现）
 
     惩罚相邻面片法线差异过大，用于平滑表面。
 
@@ -240,61 +553,47 @@ def mesh_normal_consistency_loss(
     Returns:
         loss: 法线一致性损失
     """
-    # 计算面片法线
-    v0 = vertices[faces[:, 0]]  # [F, 3]
-    v1 = vertices[faces[:, 1]]  # [F, 3]
-    v2 = vertices[faces[:, 2]]  # [F, 3]
-
-    e1 = v1 - v0  # [F, 3]
-    e2 = v2 - v0  # [F, 3]
-
-    face_normals = torch.cross(e1, e2, dim=-1)  # [F, 3]
-    face_normals = face_normals / (face_normals.norm(dim=-1, keepdim=True).clamp(min=1e-8))
-
-    # 构建面片邻接关系（共享边的面片）
-    # 简化版：使用共享顶点的面片
-    num_faces = faces.shape[0]
     device = vertices.device
+    F_num = faces.shape[0]
 
-    # 从边构建面片邻接
-    edges = torch.cat([
-        faces[:, [0, 1]],
-        faces[:, [1, 2]],
-        faces[:, [2, 0]],
-    ], dim=0)  # [3F, 2]
+    # --- 计算面片法线 ---
+    v0, v1, v2 = vertices[faces[:, 0]], vertices[faces[:, 1]], vertices[faces[:, 2]]
+    face_normals = torch.cross(v1 - v0, v2 - v0, dim=1)
+    face_normals = face_normals / face_normals.norm(dim=1, keepdim=True).clamp(min=1e-8)  # [F,3]
 
-    # 排序边的顶点索引，使得 (a, b) 和 (b, a) 相同
-    edges_sorted = torch.sort(edges, dim=1)[0]  # [3F, 2]
+    # --- 构建共享边的邻接对 ---
+    # edges: [3*F, 2]
+    edges = torch.cat([faces[:, [0,1]], faces[:, [1,2]], faces[:, [2,0]]], dim=0)
+    # edge -> faces mapping
+    faces_idx = torch.arange(F_num, device=device).repeat(3)
 
-    # 为每条边记录其所属的面片索引
-    face_indices = torch.arange(num_faces, device=device).repeat(3)  # [3F]
+    # 为了向量化，先把 edges 排序
+    edges_sorted, _ = torch.sort(edges, dim=1)
 
-    # 找到共享边的面片对
-    # 使用字典来找到共享边
-    edge_to_faces = {}
-    for i, (e, f) in enumerate(zip(edges_sorted.tolist(), face_indices.tolist())):
-        key = tuple(e)
-        if key not in edge_to_faces:
-            edge_to_faces[key] = []
-        edge_to_faces[key].append(f)
+    # 使用 unique 找到重复边（共享边）
+    edges_unique, inverse, counts = torch.unique(edges_sorted, return_inverse=True, return_counts=True, dim=0)
 
-    # 收集相邻面片对
-    adjacent_pairs = []
-    for faces_list in edge_to_faces.values():
-        if len(faces_list) == 2:
-            adjacent_pairs.append(faces_list)
+    # 只保留共享边
+    shared_edge_mask = counts[inverse] == 2
+    edges_shared = edges_sorted[shared_edge_mask]
+    faces_shared = faces_idx[shared_edge_mask]
 
-    if len(adjacent_pairs) == 0:
+    # 每对边对应的两个面
+    # 分组为 shape [P,2]，P = number of shared edges
+    perm = torch.argsort(inverse[shared_edge_mask])
+    faces_pairs = faces_shared[perm].view(-1, 2)
+
+    if faces_pairs.numel() == 0:
         return torch.tensor(0.0, device=device)
 
-    adjacent_pairs = torch.tensor(adjacent_pairs, device=device, dtype=torch.long)  # [P, 2]
+    # --- 计算相邻面片法线差异 ---
+    n1 = face_normals[faces_pairs[:, 0]]
+    n2 = face_normals[faces_pairs[:, 1]]
 
-    # 计算相邻面片法线的点积
-    n1 = face_normals[adjacent_pairs[:, 0]]  # [P, 3]
-    n2 = face_normals[adjacent_pairs[:, 1]]  # [P, 3]
-
-    # 1 - dot product = 0 表示法线相同，= 2 表示法线相反
-    dot_product = (n1 * n2).sum(dim=-1)  # [P]
-    loss = (1 - dot_product).mean()
+    # 使用绝对值避免叉乘顺序/法线方向问题
+    dot = (n1 * n2).sum(dim=1).clamp(-1.0, 1.0)
+    loss = (1.0 - dot.abs()).mean()
 
     return loss
+
+

@@ -7,6 +7,7 @@ _EPS_ACOS = 1e-7   # acos 输入远离 ±1，避免 d(acos)/dx 在边界处为 i
 _COT_MIN = -1e3
 _COT_MAX = 1e3
 
+
 def angle_safe(u: torch.Tensor, v: torch.Tensor, eps: float = 1e-12):
     """
         Compute the angle between u and v using the libigl half-angle formula:
@@ -30,7 +31,7 @@ def angle_safe(u: torch.Tensor, v: torch.Tensor, eps: float = 1e-12):
         
     theta = 2.0 * torch.atan(num / denom)
     return theta
-   
+    
 
 
 
