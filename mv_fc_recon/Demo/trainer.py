@@ -8,7 +8,8 @@ import pickle
 
 from camera_control.Method.io import loadMeshFile
 from camera_control.Method.mesh import normalizeMesh
-from camera_control.Module.mesh_renderer import MeshRenderer
+# from camera_control.Module.mesh_renderer import MeshRenderer
+from camera_control.Module.mesh_rendererV2 import MeshRenderer
 
 from mv_fc_recon.Method.time import getCurrentTime
 from mv_fc_recon.Module.trainer import Trainer
@@ -16,11 +17,11 @@ from mv_fc_recon.Module.trainer import Trainer
 
 def demo():
     # 小妖怪头
-    shape_id = "003fe719725150960b14cdd6644afe5533743ef63d3767c495ab76a6384a9b2f"
+    # shape_id = "003fe719725150960b14cdd6644afe5533743ef63d3767c495ab76a6384a9b2f"
     # 女人上半身
     # shape_id = "017c6e8b81a17c298baf2aba24fd62fa5a992ba8346bc86b2b5008caf1478873"
     # 长发男人头
-    # shape_id = "0228c5cdba8393cd4d947ac2e915f769f684c73b87e6939c129611ba665cafcb"
+    shape_id = "0228c5cdba8393cd4d947ac2e915f769f684c73b87e6939c129611ba665cafcb"
 
     device = 'cuda:0'
 
@@ -65,14 +66,13 @@ def demo():
     fitting_mesh = Trainer.fitImagesWithSDFLoss(
         camera_list=camera_list,
         mesh=mesh,
-        resolution=192,
+        resolution=128,
         device=device,
-        num_iterations=200,
-        log_interval=5,
+        num_iterations=300,
+        log_interval=10,
         log_dir=log_dir,
     )
 
-    # fitting_mesh.export(log_dir + 'fc_fitting_mesh.ply')
-    fitting_mesh.export( shape_id + '_fc_fitting_mesh.ply')
+    fitting_mesh.export(log_dir + 'fc_fitting_mesh.ply')
     print("[result] ", shape_id + '_fc_fitting_mesh.ply') 
     return True
