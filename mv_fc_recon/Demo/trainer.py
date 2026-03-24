@@ -22,6 +22,8 @@ def demo():
     # shape_id = "017c6e8b81a17c298baf2aba24fd62fa5a992ba8346bc86b2b5008caf1478873"
     # 长发男人头
     shape_id = "0228c5cdba8393cd4d947ac2e915f769f684c73b87e6939c129611ba665cafcb"
+    # 带texture的牛
+    # shape_id = "spot"
 
     device = 'cuda:0'
 
@@ -32,6 +34,7 @@ def demo():
     camera_pkl_file_path = data_folder_path + 'camera_fc.pkl'
     if not os.path.exists(camera_pkl_file_path):
         normalized_gt_mesh_file_path = data_folder_path + 'gt_normalized.ply'
+        # normalized_gt_mesh_file_path = data_folder_path + 'gt_normalized.glb'
         if not os.path.exists(normalized_gt_mesh_file_path):
             gt_mesh_file_path = data_folder_path + 'gt.glb'
             mesh = loadMeshFile(gt_mesh_file_path)
@@ -48,6 +51,8 @@ def demo():
             height=1024,
             fx=1407,
             fy=1407,
+            # fx=1407/5 * 4,  #会超出图像范围
+            # fy=1407/5 * 4,
             bg_color=[255, 255, 255],
             device=device,
         )
@@ -55,6 +60,7 @@ def demo():
             pickle.dump(camera_list, f)
 
     gen_mesh_file_path = data_folder_path + "stage2_full.glb"
+    # gen_mesh_file_path = data_folder_path + "spot_sharp.glb" 
     log_dir = data_folder_path + 'mv-fc-recon/logs/' + getCurrentTime() + '/'
 
     assert os.path.exists(camera_pkl_file_path), f"camera.pkl not found at {camera_pkl_file_path}"

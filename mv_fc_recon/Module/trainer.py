@@ -8,11 +8,12 @@ from camera_control.Module.camera import Camera
 # from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
 from camera_control.Module.nvdiffrast_rendererV2 import NVDiffRastRenderer
 from flexi_cubes.Module.fc_convertor import FCConvertor
+from flexi_cubes.Module.sh_utils import RGB2SH, SH2RGB, eval_sh 
 
 from mv_fc_recon.Loss.sdf_reg_loss import flexicube_sdf_reg_loss, sdf_hessian_energy_loss
 from mv_fc_recon.Loss.thin_plate_energy import thin_plate_energy 
 from mv_fc_recon.Loss.depth_order_loss import depth_order_loss 
-from mv_fc_recon.Loss.loss_utils import l1_loss, BCELossFn
+from mv_fc_recon.Loss.loss_utils import l1_loss, render_rgb_loss, BCELossFn
 
 
 
@@ -27,6 +28,7 @@ class Trainer(object):
         lr_sdf: Optional[float] = None,
         lr_deform: Optional[float] = None,
         lr_weight: Optional[float] = None,
+        lr_sh: Optional[float] = None
     ) -> torch.optim.Adam:
         """
         为FlexiCubes参数创建优化器
@@ -47,12 +49,24 @@ class Trainer(object):
             lr_deform = lr
         if lr_weight is None:
             lr_weight = lr
+        if lr_sh is None: 
+            lr_sh = lr 
 
-        param_groups = [
-            dict(params=[fc_params['sdf']], lr=lr_sdf),
-            dict(params=[fc_params['deform']], lr=lr_deform),
-            dict(params=[fc_params['weight']], lr=lr_weight),
-        ]
+        if fc_params['sh_coeff'] is not None: 
+            print("[info] optimization with sh_coeff. ")
+            param_groups = [
+                dict(params=[fc_params['sdf']], lr=lr_sdf),
+                dict(params=[fc_params['deform']], lr=lr_deform),
+                dict(params=[fc_params['weight']], lr=lr_weight),
+                dict(params=[fc_params['sh_coeff']], lr=lr_sh)
+            ]
+        else: 
+            print("[info] optimize geometry only. ")
+            param_groups = [
+                dict(params=[fc_params['sdf']], lr=lr_sdf),
+                dict(params=[fc_params['deform']], lr=lr_deform),
+                dict(params=[fc_params['weight']], lr=lr_weight)
+            ]
 
         optimizer = torch.optim.Adam(param_groups)
         return optimizer
@@ -67,6 +81,7 @@ class Trainer(object):
         num_iterations: int = 120,
         lr: float = 5e-4,
         # 优化参数
+        lambda_rgb: float = 0,  ## 1
         lambda_depth: float = 1e1, 
         lambda_mask: float = 1e1, 
         lambda_thin_plate_energy: float = 1e-3 , 
@@ -84,7 +99,8 @@ class Trainer(object):
         """
         # 创建 FlexiCubes 参数
 
-        fc_params = FCConvertor.createFC(mesh, resolution, device)
+        initColor = True if lambda_rgb > 0 else False 
+        fc_params = FCConvertor.createFC(mesh, resolution, device, initColor=initColor) 
         if fc_params is None:
             return None
 
@@ -95,11 +111,13 @@ class Trainer(object):
             target_normal = camera.normal_world
             target_mask = camera.mask.float() 
             target_depth = camera.depth 
+            target_color = camera.image 
 
             target_data_list.append({
                 "gt_normal": target_normal, 
                 "gtM": target_mask, 
-                "gtDepth": target_depth
+                "gtDepth": target_depth,
+                "gt_color": target_color, 
             }) 
 
         # 创建优化器
@@ -117,10 +135,12 @@ class Trainer(object):
                 if i >= log_image_num:
                     break
                 writer.add_image(f'GT/Camera_{i}', (target_data["gt_normal"]).clone().permute(2, 0, 1), global_step=0)
+                if lambda_rgb > 0: 
+                    writer.add_image(f'GT_color/Camera_{i}', target_data["gt_color"].clone().permute(2, 0, 1), global_step=0)
 
         if log_dir:
             with torch.no_grad():
-                curr_mesh, _, _, _ = FCConvertor.extractMesh(fc_params, training=True) 
+                curr_mesh, _, _, _, _ = FCConvertor.extractMesh(fc_params, training=True) 
                 if curr_mesh is not None and len(curr_mesh.vertices) > 0 and len(curr_mesh.faces) > 0:
                     try:
                         curr_mesh.export(log_dir + 'start_fc_mesh.ply') 
@@ -135,7 +155,7 @@ class Trainer(object):
             optimizer.zero_grad()
 
             # 从 FlexiCubes 参数提取 mesh
-            current_mesh, vertices, L_dev, sdf = FCConvertor.extractMesh(fc_params, training=True) 
+            current_mesh, vertices, L_dev, sdf, verts_sh_coeff = FCConvertor.extractMesh(fc_params, training=True) 
 
             if iteration == 0: 
                 with torch.no_grad():
@@ -160,6 +180,7 @@ class Trainer(object):
             # ========== 渲染损失 ==========
             total_mask_loss = torch.tensor(0.0, device=device)
             total_depth_loss = torch.tensor(0.0, device=device) 
+            total_color_loss = torch.tensor(0.0, device=device) 
             render_data_list = []
             render_idx_list = []
 
@@ -172,16 +193,19 @@ class Trainer(object):
                     camera = camera_list[idx]
                     target_mask_data = target_data_list[idx]["gtM"] 
                     target_depth_data = target_data_list[idx]["gtDepth"] 
+                    target_color_data = target_data_list[idx]["gt_color"] 
                     
                     res = renderer.render(
                         current_mesh, 
                         camera, 
-                        return_types=["mask", "normal", "depth" ], 
-                        vertices_tensor=vertices
+                        return_types=["mask", "normal", "depth", "vertex" ], 
+                        vertices_tensor=vertices,
+                        verts_sh_coeff=verts_sh_coeff
                     )
                     mask_data = res["mask"]["mask"] 
                     normal_data = res["normal"] ["img"] 
                     depth_data = res["depth"]["depth"] 
+                    rgb_data = res['vertex']["img"] 
                     
                     ##----------------------render losses-----------------------
                     ## l1: l_mask 
@@ -190,16 +214,26 @@ class Trainer(object):
                     ## l2: l_depth order
                     total_depth_loss = total_depth_loss + \
                         lambda_depth * depth_order_loss(depth_data, target_depth_data, mask_data, target_mask_data) 
+                    
+                    if lambda_rgb > 0: 
+                        # vertex_render_loss = ((render_data - target_color_data).abs()).mean()
+                        vertex_render_loss = render_rgb_loss(rgb_data, target_color_data) ##gs l_rgb
+                        total_color_loss = total_color_loss + lambda_rgb * vertex_render_loss
+                     
                     ## log iamges
                     if len(render_data_list) < 9:
-                        render_data_list.append([normal_data.clone() ])
+                        if lambda_rgb > 0: 
+                            render_data_list.append([normal_data.clone(), rgb_data.clone()])
+                        else: 
+                            render_data_list.append([normal_data.clone() ])
                         render_idx_list.append(idx)
                    
-                avg_render_loss = (total_mask_loss + total_depth_loss ) / len(batch_indices)
+                avg_render_loss = (total_color_loss + total_mask_loss + total_depth_loss ) / len(batch_indices)
                 total_loss = total_loss + avg_render_loss
                 loss_dict['Render'] = avg_render_loss.item()
                 loss_dict['l_mask'] = (total_mask_loss / len(batch_indices)).item()
                 loss_dict['l_depth'] = (total_depth_loss / len(batch_indices)).item() 
+                loss_dict['l_color'] = (total_color_loss / len(batch_indices)).item()
 
             ## thin-plate energy（缩放到与 render 成固定比例，作为稳定辅助 loss）
             if lambda_thin_plate_energy > 0 and iteration > 100:
@@ -309,6 +343,13 @@ class Trainer(object):
             writer.close()
 
         # 提取最终 mesh
-        final_mesh, _, _, _ = FCConvertor.extractMesh(fc_params, training=True)
+        final_mesh, _, _, _, verts_sh_coeff = FCConvertor.extractMesh(fc_params, training=True)
+        if verts_sh_coeff is not None: 
+            base_rgb = verts_sh_coeff[:, :, 0]
+            base_rgb = SH2RGB(base_rgb)
+            base_rgb = torch.clamp(base_rgb, 0, 1)
+            import numpy as np 
+            vertex_colors = (base_rgb.detach().cpu().numpy() * 255).astype(np.uint8)
+            final_mesh.visual.vertex_colors = vertex_colors
 
         return final_mesh
