@@ -14,6 +14,7 @@ from mv_fc_recon.Loss.sdf_reg_loss import flexicube_sdf_reg_loss, sdf_hessian_en
 from mv_fc_recon.Loss.thin_plate_energy import thin_plate_energy 
 from mv_fc_recon.Loss.depth_order_loss import depth_order_loss 
 from mv_fc_recon.Loss.loss_utils import l1_loss, render_rgb_loss, BCELossFn
+from mv_fc_recon.Method.exportMeshwithSHTexture import bake_vertex_colors_from_sh
 
 
 
@@ -343,13 +344,14 @@ class Trainer(object):
             writer.close()
 
         # 提取最终 mesh
-        final_mesh, _, _, _, verts_sh_coeff = FCConvertor.extractMesh(fc_params, training=True)
+        final_mesh, final_vertices, _, _, verts_sh_coeff = FCConvertor.extractMesh(fc_params, training=True)
         if verts_sh_coeff is not None: 
-            base_rgb = verts_sh_coeff[:, :, 0]
-            base_rgb = SH2RGB(base_rgb)
-            base_rgb = torch.clamp(base_rgb, 0, 1)
-            import numpy as np 
-            vertex_colors = (base_rgb.detach().cpu().numpy() * 255).astype(np.uint8)
-            final_mesh.visual.vertex_colors = vertex_colors
-
+            final_mesh = bake_vertex_colors_from_sh(
+                renderer=renderer,
+                camera_list=camera_list,
+                final_mesh=final_mesh,
+                final_vertices=final_vertices,
+                verts_sh_coeff=verts_sh_coeff,
+                sh_deg=fc_params["sh_deg"],
+            )
         return final_mesh
