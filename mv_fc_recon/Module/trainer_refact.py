@@ -2,17 +2,15 @@ import os
 import torch
 import trimesh
 from tqdm import tqdm
-from typing import Tuple, Union, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional
 from torch.utils.tensorboard import SummaryWriter
 from camera_control.Module.camera import Camera
 
 
 from flexi_cubes.Module.fc_convertor import FCConvertor
-from flexi_cubes.Module.sh_utils import RGB2SH, SH2RGB, eval_sh 
 
 from mv_fc_recon.Method.exportSHMesh import bake_vertex_colors_from_sh
 
-# from mv_fc_recon.Loss.all_loss import loss_system 
 from mv_fc_recon.Loss.base.context import StepContext, LossResult
 
 from mv_fc_recon.Loss.base.composite_loss import CompositeLoss
@@ -32,6 +30,7 @@ class TrainerConfig:
     num_iterations: int = 120
     lr: float = 5e-4
     resolution: int = 128
+    batch_size: int = 50
     bg_color: list = field(default_factory=lambda: [255, 255, 255])
     log_image_num: int = 20
     log_interval: int = 10
@@ -49,12 +48,14 @@ class Trainer(object):
         self.camera_list: List[Camera] = cfg.camera_list
         self.initMesh: trimesh.Trimesh = cfg.initMesh
         self.resolution = cfg.resolution
+        self.batch_size = cfg.batch_size
         self.bg_color = cfg.bg_color
         self.log_image_num = cfg.log_image_num
         self.log_interval = cfg.log_interval
         self.log_dir = cfg.log_dir
 
         self.sh_resolution = 128 
+        self.batch_offset = 0
 
         #------准备训练数据和上下文------
         self.target_data_list = [] 
@@ -76,16 +77,11 @@ class Trainer(object):
 
         for camera in self.camera_list: 
             camera.to(device=self.device)
-            target_mask = camera.mask.float() 
-            target_depth = camera.toDepth(use_mask=True)
-            target_color = camera.toImageVis(use_mask=True)
-            target_color_vis = camera.toImageVis(use_mask=True)
 
             self.target_data_list.append({
-                "target_mask": target_mask, 
-                "target_depth": target_depth,
-                "target_color": target_color, 
-                "target_color_vis": target_color_vis, 
+                "target_mask": camera.mask.float(), 
+                "target_depth": camera.toDepth(use_mask=True),
+                "target_color": camera.toImageVis(use_mask=True), 
             }) 
 
         if self.log_dir is not None:
@@ -95,7 +91,7 @@ class Trainer(object):
             for i, target_data in enumerate(self.target_data_list):
                 if i >= self.log_image_num:
                     break
-                self.log_writer.add_image(f'GT/Camera_{i}', (target_data["target_color_vis"]).transpose(2, 0, 1), global_step=0)
+                self.log_writer.add_image(f'GT/Camera_{i}', target_data["target_color"].permute(2, 0, 1), global_step=0)
                 if self.lossConfig.render.lambda_rgb > 0: 
                     self.log_writer.add_image(f'GT_color/Camera_{i}', target_data["target_color"].clone().permute(2, 0, 1), global_step=0)
 
@@ -159,8 +155,18 @@ class Trainer(object):
         return optimizer
 
 
+    def get_batch(self) -> Tuple[List[Camera], List[Dict]]:
+        """按 batch_offset 取 batch_size 个 camera，索引超出时取模循环。"""
+        n = len(self.camera_list)
+        indices = [(self.batch_offset + i) % n for i in range(self.batch_size)]
+        self.batch_offset = (self.batch_offset + self.batch_size) % n
+        batch_cameras = [self.camera_list[i] for i in indices]
+        batch_targets = [self.target_data_list[i] for i in indices]
+        return batch_cameras, batch_targets
+
     def train_one_step(self, iter, current_mesh, vertices_tensor, L_dev, sdf, verts_sh_coeff) -> Tuple[bool, Optional[LossResult]]: 
-        # 创建损失上下文 
+        batch_cameras, batch_targets = self.get_batch()
+
         step_ctx = StepContext(
             iteration=iter,
             num_iterations=self.num_iterations,
@@ -170,10 +176,10 @@ class Trainer(object):
             sdf=sdf,
             L_dev=L_dev,
             fc_params=self.fc_params,
-            camera_list=self.camera_list,
-            targets=self.target_data_list
+            camera_list=batch_cameras,
+            targets=batch_targets,
         )
-        
+
         loss_result = self.loss_system(step_ctx) 
         return True, loss_result 
 
