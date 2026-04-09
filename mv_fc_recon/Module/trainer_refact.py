@@ -76,18 +76,16 @@ class Trainer(object):
 
         for camera in self.camera_list: 
             camera.to(device=self.device)
-            target_normal = camera.normal_world
             target_mask = camera.mask.float() 
-            target_depth = camera.depth 
-            target_color = camera.image 
-            target_normal_vis = camera.toMaskedNormalWorldCV()
+            target_depth = camera.toDepth(use_mask=True)
+            target_color = camera.toImageVis(use_mask=True)
+            target_color_vis = camera.toImageVis(use_mask=True)
 
             self.target_data_list.append({
-                "target_normal": target_normal, 
-                "target_normal_vis": target_normal_vis,
                 "target_mask": target_mask, 
                 "target_depth": target_depth,
                 "target_color": target_color, 
+                "target_color_vis": target_color_vis, 
             }) 
 
         if self.log_dir is not None:
@@ -97,7 +95,7 @@ class Trainer(object):
             for i, target_data in enumerate(self.target_data_list):
                 if i >= self.log_image_num:
                     break
-                self.log_writer.add_image(f'GT/Camera_{i}', (target_data["target_normal_vis"]).transpose(2, 0, 1), global_step=0)
+                self.log_writer.add_image(f'GT/Camera_{i}', (target_data["target_color_vis"]).transpose(2, 0, 1), global_step=0)
                 if self.lossConfig.render.lambda_rgb > 0: 
                     self.log_writer.add_image(f'GT_color/Camera_{i}', target_data["target_color"].clone().permute(2, 0, 1), global_step=0)
 

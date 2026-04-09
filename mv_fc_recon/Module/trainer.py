@@ -114,7 +114,7 @@ class Trainer(object):
             target_depth = camera.depth 
             target_color = camera.image 
 
-            target_normal_vis = camera.toMaskedNormalWorldCV()
+            target_normal_vis = camera.toNormalWorldVisCV()
 
             target_data_list.append({
                 "target_normal": target_normal, 
