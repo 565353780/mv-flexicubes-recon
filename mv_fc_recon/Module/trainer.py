@@ -5,16 +5,16 @@ from tqdm import tqdm
 from typing import Union, List, Dict, Optional
 from torch.utils.tensorboard import SummaryWriter
 from camera_control.Module.camera import Camera
-# from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
-from camera_control.Module.nvdiffrast_rendererV2 import NVDiffRastRenderer
+from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer
+# from camera_control.Module.nvdiffrast_rendererV2 import NVDiffRastRenderer
 from flexi_cubes.Module.fc_convertor import FCConvertor
 from flexi_cubes.Module.sh_utils import RGB2SH, SH2RGB, eval_sh 
 
-from mv_fc_recon.Loss.sdf_reg_loss import flexicube_sdf_reg_loss, sdf_hessian_energy_loss
-from mv_fc_recon.Loss.thin_plate_energy import thin_plate_energy 
-from mv_fc_recon.Loss.depth_order_loss import depth_order_loss 
-from mv_fc_recon.Loss.loss_utils import l1_loss, render_rgb_loss, BCELossFn
-from mv_fc_recon.Method.exportMeshwithSHTexture import bake_vertex_colors_from_sh
+from mv_fc_recon.Loss.func.sdf_reg_loss import flexicube_sdf_reg_loss, sdf_hessian_energy_loss
+from mv_fc_recon.Loss.func.thin_plate_energy import thin_plate_energy 
+from mv_fc_recon.Loss.func.depth_order_loss import depth_order_loss 
+from mv_fc_recon.Loss.func.loss_utils import l1_loss, render_rgb_loss, BCELossFn
+from mv_fc_recon.Method.exportSHMesh import bake_vertex_colors_from_sh
 
 
 
@@ -85,9 +85,9 @@ class Trainer(object):
         lambda_rgb: float = 0,  ## 1
         lambda_depth: float = 1e1, 
         lambda_mask: float = 1e1, 
-        lambda_thin_plate_energy: float = 1e-3 , 
+        target_ratio_thin = 3e-4, 
+        target_ratio_hes = 2e-3, 
         lambda_reg: float = 0.2 , # FlexiCubes equation(8)&(9) 默认正则化
-        lambda_smooth: float = 1e2, 
         # 其他参数
         log_image_num: int = 20, 
         log_interval: int = 10,
@@ -114,11 +114,14 @@ class Trainer(object):
             target_depth = camera.depth 
             target_color = camera.image 
 
+            target_normal_vis = camera.toMaskedNormalWorldCV()
+
             target_data_list.append({
-                "gt_normal": target_normal, 
-                "gtM": target_mask, 
-                "gtDepth": target_depth,
-                "gt_color": target_color, 
+                "target_normal": target_normal, 
+                "target_normal_vis": target_normal_vis,
+                "target_mask": target_mask, 
+                "target_depth": target_depth,
+                "target_color": target_color, 
             }) 
 
         # 创建优化器
@@ -135,10 +138,12 @@ class Trainer(object):
             for i, target_data in enumerate(target_data_list):
                 if i >= log_image_num:
                     break
-                writer.add_image(f'GT/Camera_{i}', (target_data["gt_normal"]).clone().permute(2, 0, 1), global_step=0)
+                # writer.add_image(f'GT/Camera_{i}', (target_data["target_normal"]).clone().permute(2, 0, 1), global_step=0)
+                writer.add_image(f'GT/Camera_{i}', (target_data["target_normal_vis"]).transpose(2, 0, 1), global_step=0)
                 if lambda_rgb > 0: 
-                    writer.add_image(f'GT_color/Camera_{i}', target_data["gt_color"].clone().permute(2, 0, 1), global_step=0)
-
+                    writer.add_image(f'GT_color/Camera_{i}', target_data["target_color"].clone().permute(2, 0, 1), global_step=0)
+        # print("pause. ")
+        # input() 
         if log_dir:
             with torch.no_grad():
                 curr_mesh, _, _, _, _ = FCConvertor.extractMesh(fc_params, training=True) 
@@ -151,19 +156,12 @@ class Trainer(object):
 
         # 训练循环
         pbar = tqdm(range(num_iterations), desc='FlexiCubes Optimization') 
-        renderer = NVDiffRastRenderer() 
+        # renderer = NVDiffRastRenderer() 
         for iteration in pbar:
             optimizer.zero_grad()
 
             # 从 FlexiCubes 参数提取 mesh
-            current_mesh, vertices, L_dev, sdf, verts_sh_coeff = FCConvertor.extractMesh(fc_params, training=True) 
-
-            if iteration == 0: 
-                with torch.no_grad():
-                    V0 = torch.from_numpy(current_mesh.vertices).float().to(device) 
-                    F0 = torch.from_numpy(current_mesh.faces).long().to(device) 
-                    E_thinplate_base = thin_plate_energy(V0, F0) 
-                E_thinplate_base = E_thinplate_base.detach() 
+            current_mesh, vertices_tensor, L_dev, sdf, verts_sh_coeff = FCConvertor.extractMesh(fc_params, training=True) 
 
             # 检查网格有效性
             if current_mesh is None or len(current_mesh.vertices) == 0 or len(current_mesh.faces) == 0:
@@ -192,21 +190,24 @@ class Trainer(object):
 
                 for idx in batch_indices:
                     camera = camera_list[idx]
-                    target_mask_data = target_data_list[idx]["gtM"] 
-                    target_depth_data = target_data_list[idx]["gtDepth"] 
-                    target_color_data = target_data_list[idx]["gt_color"] 
-                    
-                    res = renderer.render(
-                        current_mesh, 
-                        camera, 
-                        return_types=["mask", "normal", "depth", "vertex" ], 
-                        vertices_tensor=vertices,
-                        verts_sh_coeff=verts_sh_coeff
+                    target_mask_data = target_data_list[idx]["target_mask"] 
+                    target_depth_data = target_data_list[idx]["target_depth"] 
+                    target_color_data = target_data_list[idx]["target_color"] 
+
+                    render_dict = NVDiffRastRenderer.render(
+                        mesh=current_mesh,
+                        camera=camera,
+                        render_types=['mask', 'rgb', 'depth', 'normal'],
+                        # bg_color=bg_color,
+                        vertices_tensor=vertices_tensor,
+                        enable_antialias=True,
                     )
-                    mask_data = res["mask"]["mask"] 
-                    normal_data = res["normal"] ["img"] 
-                    depth_data = res["depth"]["depth"] 
-                    rgb_data = res['vertex']["img"] 
+                    mask_data = render_dict['mask'] 
+                    mask_bool = render_dict['mask'].bool() 
+                    normal_data = render_dict['rgb_normal_world'] 
+                    depth_data = render_dict['depth'] 
+                    # rgb_data = render_dict['rgb'] 
+
                     
                     ##----------------------render losses-----------------------
                     ## l1: l_mask 
@@ -214,7 +215,7 @@ class Trainer(object):
                     total_mask_loss = total_mask_loss + lambda_mask * mask_render_loss 
                     ## l2: l_depth order
                     total_depth_loss = total_depth_loss + \
-                        lambda_depth * depth_order_loss(depth_data, target_depth_data, mask_data, target_mask_data) 
+                        lambda_depth * depth_order_loss(depth_data, target_depth_data, mask_bool, target_mask_data) 
                     
                     if lambda_rgb > 0: 
                         # vertex_render_loss = ((render_data - target_color_data).abs()).mean()
@@ -236,13 +237,92 @@ class Trainer(object):
                 loss_dict['l_depth'] = (total_depth_loss / len(batch_indices)).item() 
                 loss_dict['l_color'] = (total_color_loss / len(batch_indices)).item()
 
-            ## thin-plate energy（缩放到与 render 成固定比例，作为稳定辅助 loss）
-            if lambda_thin_plate_energy > 0 and iteration > 100:
-                thinplate_loss = lambda_thin_plate_energy * thin_plate_energy(
-                    vertices, faces_tensor, factor=E_thinplate_base
-                )
-                total_loss = total_loss + thinplate_loss 
-                loss_dict['thinPlateE'] = thinplate_loss.item()
+
+            # ---------------------------------------------
+            # Geometry regularizers: thin-plate + Hessian
+            # 使用 warmup + clamp + EMA 动态平衡到 render loss
+            # ---------------------------------------------
+            if (target_ratio_thin > 0 or target_ratio_hes > 0):
+            # if False: 
+                warmup_start = 100 
+                warmup_len = 40 
+
+                # 统一用 avg_render_loss 作为参考主项
+                render_ref = avg_render_loss.detach()
+
+                # ----------------------------
+                # 1) thin-plate regularizer
+                # ----------------------------
+                if target_ratio_thin > 0:
+                # if False: 
+                    thinplate_loss_raw = thin_plate_energy(
+                        vertices_tensor, faces_tensor, factor=1
+                    )
+
+                    if iteration < warmup_start:
+                        lambda_thin_plate_energy_cur = 0.0
+                    else:
+                        raw_lambda_thin = target_ratio_thin * render_ref / (thinplate_loss_raw.detach() + 1e-8)
+                        # raw_lambda_thin = torch.clamp(raw_lambda_thin, min=0.0, max=1e-4).item()
+                        alpha_thin = 0.02
+
+                        if not hasattr(Trainer, "_lambda_thin_plate_energy_ema"):
+                            Trainer._lambda_thin_plate_energy_ema = raw_lambda_thin
+
+                        alpha_thin = 0.02
+                        Trainer._lambda_thin_plate_energy_ema = (
+                            (1.0 - alpha_thin) * Trainer._lambda_thin_plate_energy_ema
+                            + alpha_thin * raw_lambda_thin
+                        )
+
+                        lambda_thin_plate_energy_cur = Trainer._lambda_thin_plate_energy_ema
+
+                        # warmup ramp
+                        t = min((iteration - warmup_start) / warmup_len, 1.0)
+                        lambda_thin_plate_energy_cur *= t
+
+                    thinplate_loss = lambda_thin_plate_energy_cur * thinplate_loss_raw
+                    total_loss = total_loss + thinplate_loss
+
+                    loss_dict['thinPlateE_raw'] = thinplate_loss_raw.item()
+                    loss_dict['thinPlateE'] = thinplate_loss.item()
+                    loss_dict['lambda_thinPlate'] = float(lambda_thin_plate_energy_cur)
+
+                # ----------------------------
+                # 2) SDF Hessian regularizer
+                # ----------------------------
+                if target_ratio_hes > 0:
+                # if False: 
+                    x_nx3 = fc_params['x_nx3']
+                    hessian_loss_raw = sdf_hessian_energy_loss(sdf, grid_edges, x_nx3)
+
+                    if iteration < warmup_start:
+                        lambda_smooth_cur = 0.0
+                    else:
+                        raw_lambda_hes = target_ratio_hes * render_ref / (hessian_loss_raw.detach() + 1e-8)
+
+                        if not hasattr(Trainer, "_lambda_hessian_energy_ema"):
+                            Trainer._lambda_hessian_energy_ema = raw_lambda_hes
+
+                        alpha_hes = 0.02
+                        Trainer._lambda_hessian_energy_ema = (
+                            (1.0 - alpha_hes) * Trainer._lambda_hessian_energy_ema
+                            + alpha_hes * raw_lambda_hes
+                        )
+
+                        lambda_smooth_cur = Trainer._lambda_hessian_energy_ema
+
+                        # warmup ramp
+                        t = min((iteration - warmup_start) / warmup_len, 1.0)
+                        lambda_smooth_cur *= t
+
+                    loss_hessian = lambda_smooth_cur * hessian_loss_raw
+                    total_loss = total_loss + loss_hessian
+
+                    loss_dict['hes_raw'] = hessian_loss_raw.item()
+                    loss_dict['hes'] = loss_hessian.item()
+                    loss_dict['lambda_hes'] = float(lambda_smooth_cur)
+
 
             # FlexiCubes regularizers 
             if lambda_reg > 0: 
@@ -259,12 +339,6 @@ class Trainer(object):
                 loss_dict['Reg'] = reg_loss.item() 
                 total_loss = total_loss + reg_loss 
             
-
-            if lambda_smooth > 0 and iteration > 100: 
-                x_nx3 = fc_params['x_nx3'] 
-                loss_hessian = lambda_smooth * sdf_hessian_energy_loss(sdf, grid_edges, x_nx3) 
-                total_loss = total_loss + loss_hessian
-                loss_dict['hes'] = loss_hessian.item() 
 
 
             # 检查损失是否包含 NaN 或 Inf
