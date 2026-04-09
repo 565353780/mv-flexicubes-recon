@@ -77,12 +77,20 @@ class Trainer(object):
 
         for camera in self.camera_list: 
             camera.to(device=self.device)
+            target_depth = camera.toDepth(use_mask=True)
+            target_color = camera.toImageVis(use_mask=True)
+
+            depth_h, depth_w = target_depth.shape[:2]
+            target_color = torch.nn.functional.interpolate(
+                target_color.permute(2, 0, 1).unsqueeze(0),
+                size=(depth_h, depth_w), mode='bilinear', align_corners=False
+            ).squeeze(0).permute(1, 2, 0)
 
             self.target_data_list.append({
-                "target_mask": camera.mask.float(), 
-                "target_depth": camera.toDepth(use_mask=True),
-                "target_color": camera.toImageVis(use_mask=True), 
-            }) 
+                "target_mask": camera.mask.float(),
+                "target_depth": target_depth,
+                "target_color": target_color,
+            })
 
         if self.log_dir is not None:
             os.makedirs(self.log_dir, exist_ok=True)
