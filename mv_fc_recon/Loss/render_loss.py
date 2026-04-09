@@ -1,5 +1,4 @@
 import torch
-from typing import Any
 from dataclasses import dataclass, field 
 
 from camera_control.Module.nvdiffrast_renderer import NVDiffRastRenderer

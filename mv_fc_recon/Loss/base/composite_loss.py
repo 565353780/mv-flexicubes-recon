@@ -1,4 +1,4 @@
-from typing import List, Any 
+from typing import List
 from .context import StepContext, LossResult
 from .loss_base import BaseLoss
 import torch 
